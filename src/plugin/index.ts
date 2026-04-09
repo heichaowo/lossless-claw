@@ -1607,7 +1607,7 @@ function wirePluginHandlers(
   );
 
   api.registerCommand(
-    createLcmCommand({ db: shared.waitForDatabase, config: deps.config, deps }),
+    createLcmCommand({ db: shared.waitForDatabase, config: deps.config, deps, getEngine: shared.waitForEngine }),
   );
 }
 

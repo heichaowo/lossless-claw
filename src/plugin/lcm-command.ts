@@ -52,6 +52,7 @@ type CurrentConversationResolution =
 type ParsedLcmCommand =
   | { kind: "status" }
   | { kind: "doctor"; apply: boolean }
+  | { kind: "bootstrap"; sessionFile: string; sessionId: string; sessionKey: string | undefined; dryRun: boolean }
   | { kind: "help"; error?: string };
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -161,12 +162,51 @@ function parseLcmCommand(rawArgs: string | undefined): ParsedLcmCommand {
         kind: "help",
         error: "`/lcm doctor` accepts no arguments, or `apply` for the scoped repair path.",
       };
+    case "bootstrap": {
+      // /lcm bootstrap --path <file> [--session-id <id>] [--session-key <key>] [--dry-run]
+      let sessionFile: string | undefined;
+      let sessionId: string | undefined;
+      let sessionKey: string | undefined;
+      let dryRun = false;
+      for (let i = 0; i < rest.length; i++) {
+        const flag = rest[i]?.toLowerCase();
+        if ((flag === "--path" || flag === "-p") && i + 1 < rest.length) {
+          sessionFile = rest[++i];
+        } else if (flag === "--session-id" && i + 1 < rest.length) {
+          sessionId = rest[++i];
+        } else if (flag === "--session-key" && i + 1 < rest.length) {
+          sessionKey = rest[++i];
+        } else if (flag === "--dry-run") {
+          dryRun = true;
+        } else {
+          return {
+            kind: "help",
+            error: `Unknown argument \`${rest[i]}\` for bootstrap. Usage: /lcm bootstrap --path <file> [--session-id <id>] [--session-key <key>] [--dry-run]`,
+          };
+        }
+      }
+      if (!sessionFile) {
+        return { kind: "help", error: "`/lcm bootstrap` requires `--path <session-file>`."};
+      }
+      // Derive session-id from filename if not provided (OpenClaw transcript files are named <uuid>.jsonl)
+      if (!sessionId) {
+        const base = sessionFile.split("/").pop() ?? sessionFile;
+        const derived = base.replace(/\.jsonl$/i, "");
+        // Validate it looks like a UUID
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(derived)) {
+          sessionId = derived;
+        } else {
+          return { kind: "help", error: `Could not derive session-id from filename \`${base}\`. Pass --session-id <uuid> explicitly.` };
+        }
+      }
+      return { kind: "bootstrap", sessionFile, sessionId, sessionKey, dryRun };
+    }
     case "help":
       return { kind: "help" };
     default:
       return {
         kind: "help",
-        error: `Unknown subcommand \`${head}\`. Supported: status, doctor, doctor apply.`,
+        error: `Unknown subcommand \`${head}\`. Supported: status, doctor, doctor apply, bootstrap.`,
       };
   }
 }
@@ -424,6 +464,10 @@ function buildHelpText(error?: string): string {
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} status`), "Show plugin, Global, and current-conversation status."),
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor`), "Scan for broken or truncated summaries."),
       buildStatLine(formatCommand(`${VISIBLE_COMMAND} doctor apply`), "Repair broken summaries in the current conversation."),
+      buildStatLine(
+        formatCommand(`${VISIBLE_COMMAND} bootstrap --path <file>`),
+        "Import a historical transcript file into the LCM database. Optionally pass --session-key and --dry-run.",
+      ),
     ]),
     "",
     buildSection("🧭 Notes", [
@@ -714,6 +758,8 @@ export function createLcmCommand(params: {
   config: LcmConfig;
   deps?: LcmDependencies;
   summarize?: LcmSummarizeFn;
+  /** Optional async getter for the LcmContextEngine instance — required for the `bootstrap` subcommand. */
+  getEngine?: () => Promise<{ bootstrap: (p: { sessionId: string; sessionFile: string; sessionKey?: string }) => Promise<{ bootstrapped: boolean; importedMessages: number; reason?: string }> }>;
 }): OpenClawPluginCommandDefinition {
   const getDb = async (): Promise<DatabaseSync> =>
     typeof params.db === "function" ? await params.db() : params.db;
@@ -742,6 +788,51 @@ export function createLcmCommand(params: {
                 }),
               }
             : { text: await buildDoctorText({ ctx, db: await getDb() }) };
+        case "bootstrap": {
+          const { existsSync } = await import("node:fs");
+          if (!existsSync(parsed.sessionFile)) {
+            return { text: `❌ File not found: \`${parsed.sessionFile}\`` };
+          }
+          if (parsed.dryRun) {
+            return {
+              text: [
+                `🔍 **Dry run** — would bootstrap from:`,
+                `  file: \`${parsed.sessionFile}\``,
+                `  session-id: \`${parsed.sessionId}\``,
+                ...(parsed.sessionKey ? [`  session-key: \`${parsed.sessionKey}\``] : []),
+                ``,
+                `Run without \`--dry-run\` to import.`,
+              ].join("\n"),
+            };
+          }
+          if (!params.getEngine) {
+            return { text: `❌ Bootstrap is unavailable: engine getter not configured.` };
+          }
+          const engine = await params.getEngine();
+          const result = await engine.bootstrap({
+            sessionId: parsed.sessionId,
+            sessionFile: parsed.sessionFile,
+            sessionKey: parsed.sessionKey,
+          });
+          if (!result.bootstrapped && result.reason) {
+            return {
+              text: [
+                `⚠️ Bootstrap skipped: ${result.reason}`,
+                `  file: \`${parsed.sessionFile}\``,
+                `  session-id: \`${parsed.sessionId}\``,
+              ].join("\n"),
+            };
+          }
+          return {
+            text: [
+              `✅ Bootstrap complete`,
+              `  file: \`${parsed.sessionFile}\``,
+              `  session-id: \`${parsed.sessionId}\``,
+              ...(parsed.sessionKey ? [`  session-key: \`${parsed.sessionKey}\``] : []),
+              `  imported messages: ${result.importedMessages.toLocaleString()}`,
+            ].join("\n"),
+          };
+        }
         case "help":
           return { text: buildHelpText(parsed.error) };
       }
