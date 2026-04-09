@@ -170,12 +170,16 @@ function parseLcmCommand(rawArgs: string | undefined): ParsedLcmCommand {
       let dryRun = false;
       for (let i = 0; i < rest.length; i++) {
         const flag = rest[i]?.toLowerCase();
-        if ((flag === "--path" || flag === "-p") && i + 1 < rest.length) {
-          sessionFile = rest[++i];
-        } else if (flag === "--session-id" && i + 1 < rest.length) {
-          sessionId = rest[++i];
-        } else if (flag === "--session-key" && i + 1 < rest.length) {
-          sessionKey = rest[++i];
+        const next = rest[i + 1];
+        if ((flag === "--path" || flag === "-p") && next !== undefined) {
+          sessionFile = next;
+          i++;
+        } else if (flag === "--session-id" && next !== undefined) {
+          sessionId = next;
+          i++;
+        } else if (flag === "--session-key" && next !== undefined) {
+          sessionKey = next;
+          i++;
         } else if (flag === "--dry-run") {
           dryRun = true;
         } else {
